@@ -23,6 +23,12 @@ if [ -z "$file_path" ] || [ ! -f "$file_path" ]; then
   exit 0
 fi
 
+# Allow binaries — images and archives have no lines worth delegating
+if ! grep -qI '' "$file_path"; then
+  echo '{"decision": "allow"}'
+  exit 0
+fi
+
 # Allow small files — delegation overhead isn't worth it
 lines=$(wc -l < "$file_path" 2>/dev/null | tr -d ' ' || echo "0")
 if [ "$lines" -le "$MIN_LINES" ]; then

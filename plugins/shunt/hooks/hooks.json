@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/gate-bash"
           }
         ]
       }

@@ -47,23 +47,14 @@ setup_fixtures() {
     fixture=$(jq -r ".evals[$i].fixture" "$evals_file")
     [ "$fixture" = "null" ] && continue
 
-    local lines
-    lines=$(jq -r ".evals[$i].fixture.lines" "$evals_file")
-
     local input_path
-    input_path=$(jq -r ".evals[$i].input.tool_input.file_path // empty" "$evals_file")
-    if [ -z "$input_path" ]; then
-      input_path=$(jq -r ".evals[$i].input.tool_input.command // empty" "$evals_file" | sed -E 's/^(cat|head|tail|less|more) +(-[^ ]+ +)*//' | sed 's/ .*//' | tr -d '"'"'")
-    fi
-    input_path=$(echo "$input_path" | sed "s|{{FIXTURES}}|$FIXTURES|")
+    input_path=$(jq -r ".evals[$i].input.tool_input.file_path" "$evals_file" | sed "s|{{FIXTURES}}|$FIXTURES|")
 
-    # Commands the parser is not meant to extract a path from (grep, git, …)
-    # reduce to the command name itself. Generating that would drop a junk file
-    # in the working directory; the fixtures those evals rely on are created by
-    # their siblings anyway.
-    case "$input_path" in
-      "$FIXTURES"/*) generate_fixture "$input_path" "$lines" ;;
-    esac
+    if [ "$(jq -r ".evals[$i].fixture.binary // false" "$evals_file")" = "true" ]; then
+      head -c 4096 /dev/urandom > "$input_path"
+    else
+      generate_fixture "$input_path" "$(jq -r ".evals[$i].fixture.lines" "$evals_file")"
+    fi
   done
 }
 
@@ -81,7 +72,7 @@ run_eval() {
   else
     result=$(echo "$input" | bash "$hook" 2>/dev/null)
   fi
-  actual=$(echo "$result" | jq -r '.decision')
+  actual=$(echo "$result" | jq -r '.decision // (if .hookSpecificOutput.updatedInput.command then "rewrite" else "none" end)')
 
   if [ "$actual" = "$expected" ]; then
     printf "  \033[32mPASS\033[0m  %-30s %s\n" "$name" "$reason"
@@ -117,6 +108,49 @@ run_suite() {
   done
 
   rm -rf "$FIXTURES"
+}
+
+# ── Gate suite ──
+
+# Runs rewritten commands through a real shell and checks what comes back.
+run_gate_suite() {
+  echo ""
+  echo "Gate (hooks/gate-bash + scripts/gate, live shell)"
+  echo "────────────────────────────────────────────────────────────────"
+
+  local shell
+  for shell in bash zsh; do
+    command -v "$shell" >/dev/null || continue
+    gate_check "$shell" "small-passthrough" "seq 1 5" "$(seq 1 5)" 0
+    gate_check "$shell" "exit-code-kept" "seq 1 3; false" "$(seq 1 3)" 1
+    gate_check "$shell" "heredoc" "cat <<'EOF'
+a
+b
+EOF" "a
+b" 0
+    gate_check "$shell" "cd-persists" "cd /tmp; pwd" "$(cd /tmp && pwd)" 0
+    gate_check "$shell" "large-truncated" "seq 1 400" "$(seq 1 20)
+
+[shunt: output is 400 lines (threshold 350); showing the first 20. Full output saved to" 0
+  done
+}
+
+gate_check() {
+  local shell="$1" name="$2" command="$3" expected="$4" expected_rc="$5"
+  TOTAL=$((TOTAL + 1))
+
+  local wrapped actual rc
+  wrapped=$(jq -cn --arg c "$command" '{tool_input: {command: $c}}' | bash "$PLUGIN_DIR/hooks/gate-bash" | jq -r '.hookSpecificOutput.updatedInput.command')
+  actual=$("$shell" -c "$wrapped" 2>/dev/null) && rc=0 || rc=$?
+  case "$name" in large-truncated) actual=$(printf '%s\n' "$actual" | sed -n '1,22p' | sed -E 's/ saved to .*/ saved to/') ;; esac
+
+  if [ "$actual" = "$expected" ] && [ "$rc" = "$expected_rc" ]; then
+    printf "  \033[32mPASS\033[0m  %-30s %s\n" "$name" "$shell"
+    PASSED=$((PASSED + 1))
+  else
+    printf "  \033[31mFAIL\033[0m  %-30s %s rc=%s expected_rc=%s\n%s\n" "$name" "$shell" "$rc" "$expected_rc" "$actual"
+    FAILED=$((FAILED + 1))
+  fi
 }
 
 # ── Transport suite ──
@@ -305,7 +339,8 @@ run_benchmarks() {
 # ── Main ──
 
 run_suite "$SCRIPT_DIR/../hooks/check-file-size" "$SCRIPT_DIR/hook-evals.json" "Read hook (check-file-size)"
-run_suite "$SCRIPT_DIR/../hooks/check-bash-read" "$SCRIPT_DIR/bash-hook-evals.json" "Bash hook (check-bash-read)"
+run_suite "$SCRIPT_DIR/../hooks/gate-bash" "$SCRIPT_DIR/bash-hook-evals.json" "Bash hook (gate-bash)"
+run_gate_suite
 run_transport_suite
 
 echo ""

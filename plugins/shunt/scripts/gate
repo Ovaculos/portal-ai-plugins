@@ -1,0 +1,22 @@
+#!/bin/bash
+# Usage: gate <saved-stdout-file> <exit-code>
+# Prints the saved output when it is under SHUNT_MIN_LINES, otherwise the first
+# 20 lines plus where the rest went and how to delegate reading it.
+
+MIN_LINES="${SHUNT_MIN_LINES:-350}"
+case "$MIN_LINES" in ''|*[!0-9]*) MIN_LINES=350 ;; esac
+
+out="$1" rc="${2:-0}"
+lines=$(wc -l < "$out" | tr -d ' ')
+
+if [ "$lines" -le "$MIN_LINES" ]; then
+  cat "$out"
+  rm -f "$out"
+  exit "$rc"
+fi
+
+head -n 20 "$out"
+echo
+echo "[shunt: output is $lines lines (threshold $MIN_LINES); showing the first 20. Full output saved to $out."
+echo " Delegate reading it: $(cd "$(dirname "$0")" && pwd)/bulk-read --question \"<what you need from it>\" --paths $out]"
+exit "$rc"

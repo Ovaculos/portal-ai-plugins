@@ -1,0 +1,24 @@
+#!/bin/bash
+# Wraps every Bash command so its stdout passes through scripts/gate, which
+# hands back small output verbatim and truncates large output with a pointer
+# to the saved file and the bulk-read command that reads it.
+
+input=$(cat)
+
+command=$(echo "$input" | jq -r '.tool_input.command // empty')
+background=$(echo "$input" | jq -r '.tool_input.run_in_background // false')
+
+if [ -z "$command" ] || [ "$background" = "true" ]; then
+  echo '{"decision": "allow"}'
+  exit 0
+fi
+
+case "$command" in
+  *shunt*) echo '{"decision": "allow"}'; exit 0 ;;
+esac
+
+gate="$(cd "$(dirname "$0")/.." && pwd)/scripts/gate"
+wrapped=$(printf '__shunt_out=$(mktemp -t shunt.XXXXXX); {\n%s\n} > "$__shunt_out"; "%s" "$__shunt_out" "$?"' "$command" "$gate")
+
+echo "$input" | jq --arg c "$wrapped" \
+  '.tool_input | .command = $c | {hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: .}}'

@@ -27,11 +27,12 @@ shunt/
 │   └── plugin.json          # Plugin manifest (name, description, version)
 ├── hooks/
 │   ├── hooks.json           # Hook registration (PreToolUse matchers)
-│   ├── check-file-size      # Blocks Read on files > 350 lines
-│   └── check-bash-read      # Blocks cat/head/tail on large files
+│   ├── check-file-size      # Blocks Read on text files > 350 lines
+│   └── gate-bash            # Routes every Bash command's stdout through scripts/gate
 ├── scripts/
 │   ├── lib/
 │   │   └── codex.sh         # Shared codex exec plumbing
+│   ├── gate                 # Truncates large command output, points at bulk-read
 │   ├── bulk-read            # Invokes the bulk-reader mode
 │   └── code-write           # Invokes the code-writer mode
 ├── modes/
@@ -43,9 +44,9 @@ shunt/
 │   └── code-writer/
 │       └── SKILL.md         # When/how to call code-write
 └── evals/
-    ├── run.sh                # Runs hook + transport evals (51 tests)
-    ├── hook-evals.json       # Read hook test cases (17)
-    ├── bash-hook-evals.json  # Bash hook test cases (17)
+    ├── run.sh                # Runs hook + transport evals (54 tests)
+    ├── hook-evals.json       # Read hook test cases (18)
+    ├── bash-hook-evals.json  # Bash hook test cases (9)
     ├── transport-evals.sh    # scripts/lib/codex.sh against a stubbed codex (17)
     ├── evals.json            # End-to-end skill test cases (3)
     ├── benchmarks.json       # Token savings scenarios (4)
@@ -92,16 +93,22 @@ goes to the worker model and never enters Claude's context.
 
 Fires on every `Read` tool call. Blocks full-file reads on files exceeding `MIN_LINES` (default: 350, configurable via `SHUNT_MIN_LINES` env var). Allows through:
 - Targeted reads (offset or limit set)
+- Binary files (images, archives)
 - Files under the threshold
 - Nonexistent files (let Read handle the error)
 
-### check-bash-read (Bash hook)
+### gate-bash (Bash hook)
 
-Fires on every `Bash` tool call. Catches `cat`, `head`, `tail`, `less`, `more` on large files. Allows through:
-- Piped commands (`cat file | grep`) — targeted reads
-- Redirections (`cat file > out`) — not reading into context
-- Commands with flags that indicate targeted reads
-- Non-read commands (`git status`, `grep`, etc.)
+Fires on every `Bash` tool call and rewrites the command so its stdout lands in a temp file and passes through `scripts/gate`. Output under `MIN_LINES` comes back verbatim, exit code intact. Larger output comes back as the first 20 lines plus the path of the saved file and the exact `bulk-read` command to delegate reading it. That covers `sed`, `rg`, `git diff`, pipelines, anything — the gate looks at what came out, not at which command ran.
+
+Not rewritten:
+- Background commands (`run_in_background`) — they stream on their own
+- Calls into shunt itself
+
+Trade-offs:
+- Permission rules that match on the literal command (`Bash(git status)`) no longer match, because the command Claude Code sees is the wrapped one. Auto mode is unaffected.
+- A command that calls `exit` skips the gate and its output is lost. Use `return` or let the command end.
+- Truncated output leaves its temp file behind under `$TMPDIR/shunt.*` so bulk-read can read it.
 
 ## Configuration
 
