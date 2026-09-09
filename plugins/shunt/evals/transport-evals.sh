@@ -46,7 +46,7 @@ check() {
   fi
 }
 
-flag_value() { grep -x -A1 -- "$1" "$CAPTURED_ARGS" | tail -1; }
+flag_value() { grep -x -A1 -- "$1" "$CAPTURED_ARGS" | grep -vx -- "$1" | grep -v '^--$' | paste -sd' ' -; }
 has_flag() { grep -qx -- "$1" "$CAPTURED_ARGS" && echo y || echo n; }
 
 # ── Invocation ──
@@ -59,20 +59,22 @@ check "answer-text-extracted" "- first line
   "reads the last-message file instead of scraping stdout"
 check "instructions-prepended" "$(cat "$PLUGIN_DIR/modes/bulk-reader.md" "$message_file")" "$(cat "$CAPTURED_PROMPT")" \
   "prompt is the mode instructions followed by the message verbatim"
-check "default-model-sent" "gpt-5.6-luna" "$(flag_value --model)" \
-  "the model flag carries the default"
+check "reader-model" "gpt-5.6-luna" "$(flag_value --model)" "bulk-reader uses the read model"
+check "reader-effort" "model_reasoning_effort=medium project_doc_max_bytes=0" "$(flag_value -c)" "bulk-reader runs at medium effort"
 check "ephemeral" "y" "$(has_flag --ephemeral)" "no session files left behind"
 check "read-only-sandbox" "read-only" "$(flag_value --sandbox)" "the worker cannot write"
 check "prompt-on-stdin" "-" "$(tail -1 "$CAPTURED_ARGS")" "the corpus never touches argv"
 check "user-config-ignored" "y" "$(has_flag --ignore-user-config)" "no MCP servers or plugins from ~/.codex reach the worker"
-check "project-docs-ignored" "project_doc_max_bytes=0" "$(flag_value -c)" "the repo's AGENTS.md does not reshape the answer"
 
-SHUNT_MODEL="other-model" shunt_invoke bulk-reader "$message_file" >/dev/null
-check "model-overridable" "other-model" "$(flag_value --model)" "SHUNT_MODEL picks the model"
+SHUNT_READ_MODEL="other-model" SHUNT_READ_EFFORT="low" shunt_invoke bulk-reader "$message_file" >/dev/null
+check "reader-overridable" "other-model low" "$(flag_value --model) $(flag_value -c | cut -d= -f2 | cut -d' ' -f1)" \
+  "SHUNT_READ_MODEL and SHUNT_READ_EFFORT pick the reader"
 
 shunt_invoke code-writer "$message_file" >/dev/null
 check "code-writer-instructions" "$(cat "$PLUGIN_DIR/modes/code-writer.md" "$message_file")" "$(cat "$CAPTURED_PROMPT")" \
   "each mode has its own instructions"
+check "writer-model" "gpt-5.6-terra" "$(flag_value --model)" "code-writer uses the write model"
+check "writer-effort" "model_reasoning_effort=high project_doc_max_bytes=0" "$(flag_value -c)" "code-writer runs at high effort"
 
 # ── Failures ──
 

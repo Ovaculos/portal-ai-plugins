@@ -1,6 +1,9 @@
 #!/bin/bash
 
-SHUNT_MODEL="${SHUNT_MODEL:-gpt-5.6-luna}"
+SHUNT_READ_MODEL="${SHUNT_READ_MODEL:-gpt-5.6-luna}"
+SHUNT_READ_EFFORT="${SHUNT_READ_EFFORT:-medium}"
+SHUNT_WRITE_MODEL="${SHUNT_WRITE_MODEL:-gpt-5.6-terra}"
+SHUNT_WRITE_EFFORT="${SHUNT_WRITE_EFFORT:-high}"
 SHUNT_TIMEOUT_SECONDS="${SHUNT_TIMEOUT_SECONDS:-180}"
 SHUNT_MODES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../modes" && pwd)"
 
@@ -32,18 +35,19 @@ shunt_codex() {
 
 shunt_invoke() {
   local mode_name="$1" message_file="$2"
-  local instructions="$SHUNT_MODES_DIR/$mode_name.md" prompt_file answer_file err rc
+  local instructions="$SHUNT_MODES_DIR/$mode_name.md" model effort prompt_file answer_file err rc
 
-  if [ ! -f "$instructions" ]; then
-    echo "Error: unknown mode \"$mode_name\" (no $instructions)" >&2
-    return 1
-  fi
+  case "$mode_name" in
+    bulk-reader) model="$SHUNT_READ_MODEL" effort="$SHUNT_READ_EFFORT" ;;
+    code-writer) model="$SHUNT_WRITE_MODEL" effort="$SHUNT_WRITE_EFFORT" ;;
+    *) echo "Error: unknown mode \"$mode_name\" (no $instructions)" >&2; return 1 ;;
+  esac
 
   shunt_tmpfile prompt_file || return 1
   shunt_tmpfile answer_file || return 1
   cat "$instructions" "$message_file" > "$prompt_file"
 
-  err=$(shunt_codex --model "$SHUNT_MODEL" --ephemeral --skip-git-repo-check \
+  err=$(shunt_codex --model "$model" -c model_reasoning_effort="$effort" --ephemeral --skip-git-repo-check \
     --ignore-user-config -c project_doc_max_bytes=0 --sandbox read-only --color never \
     --output-last-message "$answer_file" - < "$prompt_file" 2>&1 >/dev/null)
   rc=$?

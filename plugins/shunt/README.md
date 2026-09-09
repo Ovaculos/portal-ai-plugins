@@ -43,10 +43,10 @@ shunt/
 │   └── code-writer/
 │       └── SKILL.md         # When/how to call code-write
 └── evals/
-    ├── run.sh                # Runs hook + transport evals (49 tests)
+    ├── run.sh                # Runs hook + transport evals (51 tests)
     ├── hook-evals.json       # Read hook test cases (17)
     ├── bash-hook-evals.json  # Bash hook test cases (17)
-    ├── transport-evals.sh    # scripts/lib/codex.sh against a stubbed codex (15)
+    ├── transport-evals.sh    # scripts/lib/codex.sh against a stubbed codex (17)
     ├── evals.json            # End-to-end skill test cases (3)
     ├── benchmarks.json       # Token savings scenarios (4)
     └── fixtures/             # Test fixture files
@@ -110,7 +110,10 @@ All settings are environment variables — add them to the `env` block in `.clau
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SHUNT_MIN_LINES` | `350` | Line count above which the Read hook blocks and redirects |
-| `SHUNT_MODEL` | `gpt-5.6-luna` | Model passed to `codex exec --model` |
+| `SHUNT_READ_MODEL` | `gpt-5.6-luna` | Model for bulk-reader |
+| `SHUNT_READ_EFFORT` | `medium` | Reasoning effort for bulk-reader |
+| `SHUNT_WRITE_MODEL` | `gpt-5.6-terra` | Model for code-writer |
+| `SHUNT_WRITE_EFFORT` | `high` | Reasoning effort for code-writer |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | Timeout for one worker invocation |
 
 ## What doesn't get delegated
