@@ -25,7 +25,7 @@
     {
       "name": "shunt",
       "description": "Shunts I/O-heavy work to a cheaper worker model via codex exec to save tokens. Hooks block large file reads and redirect to bulk-reader/code-writer scripts.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": {
         "name": "Spotify"
       },
