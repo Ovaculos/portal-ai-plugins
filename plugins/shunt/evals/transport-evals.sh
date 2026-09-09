@@ -1,36 +1,35 @@
 #!/bin/bash
-# Transport evals for scripts/lib/aika.sh.
+# Transport evals for scripts/lib/codex.sh.
 #
-# Runs against a stubbed portal-cli, so these need no Portal instance, no auth
-# and no tokens — the benchmark suite covers the real round trip.
+# Runs against a stubbed codex, so these need no login and no tokens.
 #
 # Prints one PASS/FAIL line per check plus a machine-readable "## <pass> <fail>"
-# trailer for run.sh. Runs as its own process so the stub cannot leak into the
-# benchmark suite.
+# trailer for run.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 WORKDIR="$(mktemp -d)"
-CAPTURED_PAYLOAD="$WORKDIR/captured-payload.json"
+CAPTURED_PROMPT="$WORKDIR/captured-prompt.txt"
+CAPTURED_ARGS="$WORKDIR/captured-args"
 
-# shellcheck source=../scripts/lib/aika.sh
-. "$PLUGIN_DIR/scripts/lib/aika.sh"
+# shellcheck source=../scripts/lib/codex.sh
+. "$PLUGIN_DIR/scripts/lib/codex.sh"
 
-# Stub the transport: record the payload it was given, return canned output in
-# the same shape `portal-cli actions ... --json` prints (the action's output).
-shunt_portal() {
-  local input="" want_input=false arg
-  printf '%s\n' "$@" > "$WORKDIR/captured-args"
+# Stub the transport: record the prompt and flags, write a canned answer to the
+# --output-last-message file, and print transcript noise to stdout like codex.
+shunt_codex() {
+  local out="" want_out=false arg
+  printf '%s\n' "$@" > "$CAPTURED_ARGS"
   for arg in "$@"; do
-    if [ "$want_input" = true ]; then input="$arg"; want_input=false; continue; fi
+    if [ "$want_out" = true ]; then out="$arg"; want_out=false; continue; fi
     case "$arg" in
-      --input) want_input=true ;;
+      --output-last-message) want_out=true ;;
     esac
   done
-  printf '%s' "$input" > "$CAPTURED_PAYLOAD"
-
-  echo '{"text":"- first line\n- second line","mode":{"id":"id-bulk","name":"bulk-reader"}}'
+  cat > "$CAPTURED_PROMPT"
+  echo "transcript noise that must not be treated as the answer"
+  printf -- '- first line\n- second line\n' > "$out"
 }
 
 PASSED=0
@@ -47,7 +46,8 @@ check() {
   fi
 }
 
-payload_field() { jq -r "$1" "$CAPTURED_PAYLOAD" 2>/dev/null; }
+flag_value() { grep -x -A1 -- "$1" "$CAPTURED_ARGS" | tail -1; }
+has_flag() { grep -qx -- "$1" "$CAPTURED_ARGS" && echo y || echo n; }
 
 # ── Invocation ──
 
@@ -56,98 +56,47 @@ printf 'line one\nline two\n' > "$message_file"
 
 check "answer-text-extracted" "- first line
 - second line" "$(shunt_invoke bulk-reader "$message_file")" \
-  "reads .text instead of scraping stdout"
-check "message-sent" "line one
-line two" "$(payload_field '.message')" \
-  "message survives the round trip verbatim"
-check "mode-name-sent" "bulk-reader" "$(payload_field '.mode_name')" \
-  "the backend resolves the name"
-check "no-mode-id-sent" "false" "$(payload_field 'has("mode_id")')" \
-  "mode_name and mode_id are mutually exclusive"
-check "no-history-sent" "false" "$(payload_field 'has("history")')" \
-  "every delegation is one shot"
-check "timeout-flag-sent" "180" "$(grep -x -A1 -- '--timeout-seconds' "$WORKDIR/captured-args" | tail -1)" \
-  "the invocation carries an explicit timeout"
+  "reads the last-message file instead of scraping stdout"
+check "instructions-prepended" "$(cat "$PLUGIN_DIR/modes/bulk-reader.md" "$message_file")" "$(cat "$CAPTURED_PROMPT")" \
+  "prompt is the mode instructions followed by the message verbatim"
+check "default-model-sent" "gpt-5.6-luna" "$(flag_value --model)" \
+  "the model flag carries the default"
+check "ephemeral" "y" "$(has_flag --ephemeral)" "no session files left behind"
+check "read-only-sandbox" "read-only" "$(flag_value --sandbox)" "the worker cannot write"
+check "prompt-on-stdin" "-" "$(tail -1 "$CAPTURED_ARGS")" "the corpus never touches argv"
+check "user-config-ignored" "y" "$(has_flag --ignore-user-config)" "no MCP servers or plugins from ~/.codex reach the worker"
+check "project-docs-ignored" "project_doc_max_bytes=0" "$(flag_value -c)" "the repo's AGENTS.md does not reshape the answer"
 
-# ── Mode pinning ──
+SHUNT_MODEL="other-model" shunt_invoke bulk-reader "$message_file" >/dev/null
+check "model-overridable" "other-model" "$(flag_value --model)" "SHUNT_MODEL picks the model"
 
-SHUNT_BULK_READER_MODE_ID="id-pinned"
-shunt_invoke bulk-reader "$message_file" >/dev/null
-check "pinned-mode-id-sent" "id-pinned" "$(payload_field '.mode_id')" \
-  "the override pins a mode past an ambiguity"
-check "no-mode-name-sent" "false" "$(payload_field 'has("mode_name")')" \
-  "mode_name and mode_id are mutually exclusive"
-unset SHUNT_BULK_READER_MODE_ID
+shunt_invoke code-writer "$message_file" >/dev/null
+check "code-writer-instructions" "$(cat "$PLUGIN_DIR/modes/code-writer.md" "$message_file")" "$(cat "$CAPTURED_PROMPT")" \
+  "each mode has its own instructions"
 
-# ── Mode-less fallback ──
+# ── Failures ──
 
-# A stale mode_id only warns server-side and the turn runs without the mode;
-# the output's .mode says what actually ran, and "none" must not pass as an
-# answer.
-( shunt_portal() { echo '{"text":"generic answer","mode":null}'; }
-  shunt_invoke bulk-reader "$message_file" >/dev/null 2>&1 ) && rc=0 || rc=$?
-check "modeless-answer-fails" "1" "$rc" "an answer the mode never saw is an error"
+( shunt_invoke no-such-mode "$message_file" >/dev/null 2>&1 ) && rc=0 || rc=$?
+check "unknown-mode-fails" "1" "$rc" "a mode without instructions is an error"
 
-( shunt_portal() { echo '{"text":"generic answer","mode":null}'; }
-  SHUNT_BULK_READER_MODE_ID="id-stale"
-  guard=$(shunt_invoke bulk-reader "$message_file" 2>&1 >/dev/null)
-  case "$guard" in *"SHUNT_BULK_READER_MODE_ID"*"stale"*) exit 0 ;; *) exit 1 ;; esac ) \
-  && rc=0 || rc=$?
-check "stale-pin-named" "0" "$rc" "the error points at the stale override"
+( shunt_codex() { echo 'auth failed' >&2; return 2; }
+  guard=$(shunt_invoke bulk-reader "$message_file" 2>&1 >/dev/null) && exit 1
+  case "$guard" in *"exit 2"*"auth failed"*) exit 0 ;; *) exit 1 ;; esac ) && rc=0 || rc=$?
+check "nonzero-exit-fails" "0" "$rc" "codex's exit code and stderr surface"
 
-( shunt_portal() { echo '{"mode":{"id":"id-bulk","name":"bulk-reader"}}'; }
+( shunt_codex() { cat >/dev/null; }
   shunt_invoke bulk-reader "$message_file" >/dev/null 2>&1 ) && rc=0 || rc=$?
 check "empty-answer-fails" "1" "$rc" "an answer with no text is an error"
 
-# rc 0 with garbled stdout must fail and be reported as a transport problem,
-# not blamed on mode resolution.
-( shunt_portal() { echo 'not json at all'; }
+( shunt_codex() { cat >/dev/null; seq 1 50 >&2; return 1; }
+  guard=$(shunt_invoke bulk-reader "$message_file" 2>&1 >/dev/null)
+  [ "$(printf '%s\n' "$guard" | wc -l | tr -d ' ')" -le 12 ] ) && rc=0 || rc=$?
+check "stderr-trimmed" "0" "$rc" "codex echoes the prompt to stderr; a failure must not dump the corpus"
+
+( shunt_codex() { cat >/dev/null; return 124; }
   guard=$(shunt_invoke bulk-reader "$message_file" 2>&1 >/dev/null) && exit 1
-  case "$guard" in *"unparseable"*) exit 0 ;; *) exit 1 ;; esac ) && rc=0 || rc=$?
-check "garbled-response-fails" "0" "$rc" "unparseable rc-0 output is a transport error"
-
-# ── Stderr separation ──
-
-# npx install notices and CLI warnings go to stderr on successful calls; they
-# must not corrupt the JSON envelope on stdout.
-check "stderr-noise-ignored" "answer" "$(
-  shunt_portal() {
-    echo 'npm warn deprecated something@1.0.0' >&2
-    echo '{"text":"answer","mode":{"id":"id-bulk","name":"bulk-reader"}}'
-  }
-  shunt_invoke bulk-reader "$message_file" 2>/dev/null
-)" "stderr noise must not corrupt the response"
-
-# ── Payload ceiling ──
-
-saved_payload_bytes="$SHUNT_MAX_PAYLOAD_BYTES"
-SHUNT_MAX_PAYLOAD_BYTES=10
-guard_output=$(shunt_invoke bulk-reader "$message_file" 2>&1 >/dev/null) && rc=0 || rc=$?
-check "oversized-payload-fails" "1" "$rc" "input must fit in ARG_MAX"
-case "$guard_output" in
-  *"over the 10 byte limit"*) check "oversized-payload-explained" "y" "y" "error names the limit" ;;
-  *)                          check "oversized-payload-explained" "y" "n" "error names the limit" ;;
-esac
-SHUNT_MAX_PAYLOAD_BYTES="$saved_payload_bytes"
-
-# ── Error reporting ──
-
-report=$(shunt_report_error "could not invoke chat" \
-  '{"error":"Not authenticated.","remediation":"Run `portal-cli auth login` to sign in."}' 2>&1)
-case "$report" in
-  *"could not invoke chat: Not authenticated."*"portal-cli auth login"*)
-    check "error-unwrapped" "y" "y" "portal-cli's message and remediation surface" ;;
-  *)
-    check "error-unwrapped" "y" "n" "portal-cli's message and remediation surface" ;;
-esac
-
-report=$(shunt_report_error "invoke failed" 'plain text failure' 2>&1)
-case "$report" in
-  *"invoke failed"*"plain text failure"*)
-    check "non-json-error-passed-through" "y" "y" "unparseable output is not swallowed" ;;
-  *)
-    check "non-json-error-passed-through" "y" "n" "unparseable output is not swallowed" ;;
-esac
+  case "$guard" in *"exceeded 180s"*) exit 0 ;; *) exit 1 ;; esac ) && rc=0 || rc=$?
+check "timeout-explained" "0" "$rc" "a killed worker names the timeout knob"
 
 rm -rf "$WORKDIR"
 

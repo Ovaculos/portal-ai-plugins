@@ -1,61 +1,23 @@
 # shunt
 
-A Claude Code plugin that shunts I/O-heavy work to AiKA modes, saving 82-94% of tokens on large file reads and boilerplate generation.
+A Claude Code plugin that shunts I/O-heavy work to a cheaper worker model through `codex exec`, saving 82-94% of tokens on large file reads and boilerplate generation.
 
 ## How it works
 
 Three layers, from hard gate to soft suggestion:
 
 1. **Hooks** block Claude from reading large files and redirect to the bulk-reader skill
-2. **Scripts** handle the AiKA invocation and output cleanup
+2. **Scripts** handle the codex invocation and output cleanup
 3. **Skills** tell Claude when and how to call the scripts
 
 Claude never assembles bash pipelines from prose. It calls a script with named arguments. The scripts handle everything internally.
 
-Delegation goes through the Portal CLI actions registry — one `aika:invoke-chat` call per delegation — so the plugin works against any Portal instance with AiKA enabled. Modes are addressed by name and resolved server-side: case-insensitive, preferring your own mode, then your groups', then public ones; a name matching nothing or several modes equally fails with the candidate ids.
+Each delegation is one ephemeral `codex exec` turn. The mode's instructions in `modes/<name>.md` are prepended to the message, the whole prompt goes in on stdin, and the final answer comes back through `--output-last-message`. To change what a mode does, edit its file.
 
 ## Prerequisites
 
-- [`jq`](https://jqlang.org) — `brew install jq`
-- The **portal** plugin from this marketplace, which provides the Portal CLI that shunt delegates through:
-
-```bash
-claude plugin install portal@portal
-```
-
-Then, in a new session, set up and authenticate the CLI against your Portal instance:
-
-```text
-/portal:setup
-```
-
-Check whether the two AiKA modes (`bulk-reader` and `code-writer`) already exist on your instance — many instances ship them as public modes:
-
-```bash
-portal-cli actions aika:list-modes --json --input '{"search": "bulk-reader"}'
-```
-
-If they exist, no mode creation is needed — just install the plugin and go. If not, or to create your own customized versions (e.g. different model or instructions):
-
-```bash
-portal-cli actions aika:create-mode --input '{
-  "name": "bulk-reader",
-  "description": "Bulk file reader for code analysis",
-  "instructions": "You are a precise code analyst. Read the provided files and answer the question concisely. Output structured bullets only. No greetings, no prose, no preambles, no summaries. Lead every bullet with the exact name, type, or line number. Use nested bullets for details. Skip anything the caller did not ask for.",
-  "tags": ["coding", "delegation"],
-  "resource_limits": { "temperature": 0.2 }
-}'
-
-portal-cli actions aika:create-mode --input '{
-  "name": "code-writer",
-  "description": "Boilerplate code generator",
-  "instructions": "You generate code files based on a spec and reference files. Match the existing patterns, conventions, naming, and style exactly. Output only the code — no explanations, no markdown fences unless asked. If the spec is ambiguous, make reasonable choices that match the patterns in the reference code.",
-  "tags": ["coding", "delegation"],
-  "resource_limits": { "temperature": 0.2 }
-}'
-```
-
-A mode you create is private and owned by you, and name resolution prefers your own modes — so your customized `bulk-reader` automatically shadows the public one, no configuration needed.
+- [Codex CLI](https://www.npmjs.com/package/@openai/codex) — `npm i -g @openai/codex`, then `codex login`
+- `perl` (ships with macOS and most Linux) — enforces the invocation timeout
 
 ## Plugin structure
 
@@ -69,19 +31,22 @@ shunt/
 │   └── check-bash-read      # Blocks cat/head/tail on large files
 ├── scripts/
 │   ├── lib/
-│   │   └── aika.sh          # Shared aika:invoke-chat plumbing
+│   │   └── codex.sh         # Shared codex exec plumbing
 │   ├── bulk-read            # Invokes the bulk-reader mode
 │   └── code-write           # Invokes the code-writer mode
+├── modes/
+│   ├── bulk-reader.md       # Worker instructions for bulk-read
+│   └── code-writer.md       # Worker instructions for code-write
 ├── skills/
 │   ├── bulk-reader/
 │   │   └── SKILL.md         # When/how to call bulk-read
 │   └── code-writer/
 │       └── SKILL.md         # When/how to call code-write
 └── evals/
-    ├── run.sh                # Runs hook + transport evals (51 tests)
+    ├── run.sh                # Runs hook + transport evals (49 tests)
     ├── hook-evals.json       # Read hook test cases (17)
     ├── bash-hook-evals.json  # Bash hook test cases (17)
-    ├── transport-evals.sh    # scripts/lib/aika.sh against a stubbed CLI (17)
+    ├── transport-evals.sh    # scripts/lib/codex.sh against a stubbed codex (15)
     ├── evals.json            # End-to-end skill test cases (3)
     ├── benchmarks.json       # Token savings scenarios (4)
     └── fixtures/             # Test fixture files
@@ -91,7 +56,7 @@ shunt/
 
 ### bulk-read
 
-Delegates file reading to AiKA. Files are wrapped in XML tags (`<file path="...">`) for clear boundaries.
+Delegates file reading to the worker. Files are wrapped in XML tags (`<file path="...">`) for clear boundaries.
 
 ```bash
 bulk-read --question "What does this service do?" --paths src/Service.java src/Handler.java
@@ -102,7 +67,7 @@ bulk-read --question "Which methods call the database?" --paths src/Service.java
 
 ### code-write
 
-Delegates boilerplate generation to AiKA. Strips markdown fences from output. Can write directly to disk via `--target`. `--reference` is required — without a file to match patterns against, the worker would generate context-free code that fits nothing in the project.
+Delegates boilerplate generation to the worker. Strips markdown fences from output. Can write directly to disk via `--target`. `--reference` is required — without a file to match patterns against, the worker would generate context-free code that fits nothing in the project.
 
 ```bash
 # Generate and write to file
@@ -117,11 +82,9 @@ code-write --spec "Generate a config stub" --reference config/existing.yaml
 
 ### One shot per call
 
-`aika:invoke-chat` is ephemeral: nothing is stored server-side, and the action's own follow-up
-mechanism is for the caller to replay prior turns. Replaying a file corpus is the exact cost this
-plugin exists to avoid, so shunt does not do it — every call stands alone. Re-sending files is
-free where it matters, because the corpus goes to the worker model and never enters Claude's
-context.
+Every call stands alone: `--ephemeral` keeps no session, and replaying a file corpus is the exact
+cost this plugin exists to avoid. Re-sending files is free where it matters, because the corpus
+goes to the worker model and never enters Claude's context.
 
 ## Hooks
 
@@ -147,12 +110,8 @@ All settings are environment variables — add them to the `env` block in `.clau
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SHUNT_MIN_LINES` | `350` | Line count above which the Read hook blocks and redirects |
-| `SHUNT_PORTAL_INSTANCE` | CLI default | Portal instance name or URL to invoke against |
-| `PORTAL_CLI_BIN` | `portal-cli`, else `npx` | Override how portal-cli is launched |
-| `SHUNT_MAX_PAYLOAD_BYTES` | `400000` (`120000` on Linux) | Request ceiling, since input travels through argv |
-| `SHUNT_TIMEOUT_SECONDS` | `180` | Timeout for one action invocation |
-| `SHUNT_BULK_READER_MODE_ID` | — | Pin a specific mode id if the name is ambiguous |
-| `SHUNT_CODE_WRITER_MODE_ID` | — | Pin a specific mode id if the name is ambiguous |
+| `SHUNT_MODEL` | `gpt-5.6-luna` | Model passed to `codex exec --model` |
+| `SHUNT_TIMEOUT_SECONDS` | `180` | Timeout for one worker invocation |
 
 ## What doesn't get delegated
 
@@ -165,16 +124,16 @@ The plugin is designed to know when NOT to delegate:
 ## Evals
 
 ```bash
-# Hook routing + transport plumbing — needs no Portal access
+# Hook routing + transport plumbing — needs no codex login
 bash evals/run.sh
 
-# Also re-measure token savings against the real modes — needs portal-cli auth
+# Also re-measure token savings against the real worker — needs codex login
 bash evals/run.sh --benchmark
 ```
 
 ## Benchmarks
 
-Tested against a 162K-line Java monorepo:
+Measured with the original AiKA transport against a 162K-line Java monorepo; the savings come from keeping the corpus out of Claude's context, not from the worker, so expect the same shape with codex:
 
 | Scenario | Lines | Without shunt | With shunt | Savings |
 |----------|-------|--------------|------------|---------|
@@ -188,5 +147,4 @@ Mean bulk-read savings: **90%**
 ## Known limitations
 
 - **No enforcement for code-writer** — only bulk-reader has hook enforcement. Code-writer relies on Claude recognizing when to use it via the skill description.
-- **Request size** — `aika:invoke-chat` input is passed on the command line, so a request must fit in `ARG_MAX` (1 MB on macOS, shared with the environment; Linux additionally caps a single argument at 128 KiB). shunt refuses anything over `SHUNT_MAX_PAYLOAD_BYTES` with a clear error rather than failing with `E2BIG`. Split into smaller batches.
-- **Invocation timeout** — shunt caps one action invocation at `SHUNT_TIMEOUT_SECONDS` (default 180). Very large generations can exceed it; raise the timeout or split the spec into smaller calls.
+- **Global `~/.codex/AGENTS.md` reaches the worker** — the plugin ignores `~/.codex/config.toml` and the repo's own `AGENTS.md`, but codex has no switch for the global instructions file, so personal rules there can shape the worker's output.
